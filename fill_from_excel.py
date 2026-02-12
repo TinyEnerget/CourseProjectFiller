@@ -82,7 +82,6 @@ def main():
 
     config_path = args.config or os.path.join(script_dir, "config_variants.json")
     config = load_config(config_path) if os.path.isfile(config_path) else {}
-    variant_data = generate_one_variant(config, oes_override=None, seed=args.seed)
 
     out_dir = args.out_dir or script_dir
     os.makedirs(out_dir, exist_ok=True)
@@ -124,6 +123,9 @@ def main():
         paragraph4_2 = val(idx_course)
         paragraph5 = val(idx_name)
 
+        # Для каждой строки генерируем свой вариант задания (разный seed = разные нагрузки, ОЭС и т.д.)
+        row_seed = (args.seed + row_num) if args.seed is not None else row_num
+        variant_data = generate_one_variant(config, oes_override=None, seed=row_seed)
         data = dict(variant_data)
         if paragraph3 is not None:
             data["paragraph3"] = paragraph3
