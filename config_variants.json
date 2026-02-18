@@ -9,15 +9,15 @@
     {"name": "Урал", "theta_ohl": -30}
   ],
 
-  "_comment_plan": "Таблица 0 — план района. min_circle_distance — мин. расстояние между любыми двумя кружками (в ячейках, по Чебышёву). grid_step_cm — шаг сетки в см. max_distance_km — макс. расстояние от ПС А до дальней подстанции в км. ps_a_side — ПС А: \"left\", \"right\" или \"random\".",
+  "_comment_plan": "Таблица 0 — план. A и B по бокам. Расстояние A–B: от min_distance_ab_km до max_distance_ab_km (200–250 км). Элементы схемы — из папки Nodes (A.png, B.png, 1.png … 5.png).",
   "table0_plan": {
     "rows": 8,
     "cols": 15,
     "min_circle_distance": 3,
     "grid_step_cm": 1,
-    "max_distance_km": 100,
-    "scale_cell": [1, 0, 3],
-    "ps_a_side": "random"
+    "min_distance_ab_km": 200,
+    "max_distance_ab_km": 250,
+    "scale_cell": [1, 0, 3]
   },
   "_comment_scale_cell": "Ячейка для масштаба: таблица сразу под таблицей 0 = таблица 1, 3-я ячейка (строка 0, столбец 2) → [1, 0, 2].",
   "draw_substation_circles": true,
@@ -47,7 +47,7 @@
         "I – II – III"
       ]
     },
-    "_comment_gen":"мощности района (не менее 200 МВт на район нагрузок за минусом генератора)",
+    "_comment_gen":"мощности района (не менее 200 МВт на район нагрузок за минусом генератора), количество от 3 до 6 (3600) с четкой типизацией",
     "generation": {
       "p_ust": {"min": 15, "max": 50},
       "gen_count": {"min": 2, "max": 3}

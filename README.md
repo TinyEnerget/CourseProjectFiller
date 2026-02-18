@@ -7,6 +7,7 @@
 - **Генерация вариантов** — создание нескольких вариантов с разными значениями нагрузок, напряжений, ОЭС и других параметров в заданных диапазонах.
 - **Заполнение шаблона** — подстановка данных в параграфы и таблицы документа Word (нагрузки, генерация, напряжения, дополнительные данные, условия, план с кружками подстанций).
 - **Пакетное заполнение по списку студентов** — чтение Excel-файла (номер варианта N, группа, курс, ФИО) и создание отдельного документа для каждого студента.
+- **Экспорт в PDF** — опциональная конвертация созданных .docx в .pdf (флаг `--pdf`).
 
 ## Требования
 
@@ -41,6 +42,7 @@ python generate_variants.py --count 10
 python generate_variants.py --count 5 --oes "Сибирь"
 python generate_variants.py --count 20 --out-dir variants --config config_variants.json
 python generate_variants.py --count 3 --seed 42
+python generate_variants.py --count 5 --pdf
 ```
 
 Параметры:
@@ -50,6 +52,7 @@ python generate_variants.py --count 3 --seed 42
 - `--config`, `-c` — путь к `config_variants.json`
 - `--template`, `-t` — путь к шаблону .docx
 - `--seed` — seed для ГПСЧ (для воспроизводимости)
+- `--pdf`, `-p` — дополнительно сохранять каждый вариант в PDF
 
 ### 2. Заполнение одного документа по JSON
 
@@ -57,9 +60,10 @@ python generate_variants.py --count 3 --seed 42
 
 ```bash
 python fill_template.py --template "Шаблон Район нагрузок электрической сети.docx" --data data_template.json --out result.docx
+python fill_template.py --data data_template.json --out result.docx --pdf
 ```
 
-Если `data_template.json` отсутствует, скрипт создаёт пример файла с описанием полей.
+Если `data_template.json` отсутствует, скрипт создаёт пример файла с описанием полей. Флаг `--pdf` создаёт также файл result.pdf.
 
 ### 3. Пакетное заполнение по списку студентов (Excel)
 
@@ -71,6 +75,7 @@ python fill_template.py --template "Шаблон Район нагрузок э�
 python fill_from_excel.py --excel students.xlsx --template "Шаблон Район нагрузок электрической сети.docx" --out-dir variants
 python fill_from_excel.py --excel students.xlsx --config config_variants.json
 python fill_from_excel.py --excel students.xlsx --out-dir variants --seed 100
+python fill_from_excel.py --excel students.xlsx --out-dir variants --pdf
 ```
 
 Параметры:
@@ -80,8 +85,17 @@ python fill_from_excel.py --excel students.xlsx --out-dir variants --seed 100
 - `--config`, `-c` — путь к `config_variants.json` (для генерации варианта)
 - `--sheet`, `-s` — имя листа в Excel (по умолчанию — первый)
 - `--seed` — seed для генерации варианта (один и тот же вариант для всех студентов)
+- `--pdf`, `-p` — дополнительно сохранять каждый документ в PDF
 
 Имена выходных файлов формируются по ФИО (столбец `name`) или по номеру строки.
+
+### Конвертация в PDF (флаг `--pdf`)
+
+Для создания PDF из .docx нужен один из вариантов:
+- **Windows:** установленный Microsoft Word и пакет `docx2pdf` (уже в requirements.txt).
+- **Альтернатива (любая ОС):** установленный LibreOffice; скрипт вызовет `soffice --headless --convert-to pdf`.
+
+Без Word/LibreOffice флаг `--pdf` не создаст файлы; в консоль выведется подсказка.
 
 ## Конфигурация (config_variants.json)
 

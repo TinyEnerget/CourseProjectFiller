@@ -7,3 +7,6 @@ openpyxl>=3.0.0
 # Опционально: подписи в центре кружков подстанций на плане (fill_template.py)
 # Без Pillow кружки рисуются без текста
 Pillow>=9.0.0
+
+# Конвертация DOCX → PDF (флаг --pdf). На Windows требует Microsoft Word; иначе используется LibreOffice (soffice)
+docx2pdf>=0.1.8

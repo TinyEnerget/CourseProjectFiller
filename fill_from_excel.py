@@ -19,7 +19,7 @@ except ImportError:
 
 from docx import Document
 
-from fill_template import fill_document
+from fill_template import fill_document, convert_docx_to_pdf
 from generate_variants import load_config, generate_one_variant
 
 
@@ -64,6 +64,8 @@ def main():
                         help="Имя листа в Excel (по умолчанию — первый)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Seed для ГПСЧ при генерации варианта")
+    parser.add_argument("--pdf", "-p", action="store_true",
+                        help="Дополнительно сохранять каждый документ в PDF")
     args = parser.parse_args()
 
     excel_path = args.excel or os.path.join(script_dir, "students.xlsx")
@@ -143,8 +145,15 @@ def main():
         out_name = f"{safe_name}.docx"
         out_path = os.path.join(out_dir, out_name)
         doc.save(out_path)
-        print(f"  {out_name}  N={paragraph3}, group={paragraph4_1}, course={paragraph4_2}, name={paragraph5}")
+        line = f"  {out_name}  N={paragraph3}, group={paragraph4_1}, course={paragraph4_2}, name={paragraph5}"
+        if args.pdf:
+            pdf_path = convert_docx_to_pdf(out_path)
+            if pdf_path:
+                line += f"  → {os.path.basename(pdf_path)}"
+        print(line)
 
+    if args.pdf:
+        print("Для PDF нужны: pip install docx2pdf и Microsoft Word или LibreOffice (soffice).")
     print(f"Создано документов: {len(rows)} в папке {out_dir}")
     return 0
 

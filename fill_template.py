@@ -22,6 +22,59 @@ except ImportError:
     _PIL_AVAILABLE = False
 
 
+def convert_docx_to_pdf(docx_path, pdf_path=None):
+    """
+    Конвертировать .docx в .pdf.
+    pdf_path — путь к PDF; если не задан, используется тот же каталог и имя с расширением .pdf.
+    Возвращает путь к созданному PDF или None при ошибке.
+    Использует docx2pdf (Word на Windows/macOS) или LibreOffice в headless.
+    """
+    docx_path = os.path.abspath(docx_path)
+    if not os.path.isfile(docx_path):
+        return None
+    if pdf_path is None:
+        pdf_path = os.path.splitext(docx_path)[0] + ".pdf"
+    else:
+        pdf_path = os.path.abspath(pdf_path)
+    out_dir = os.path.dirname(pdf_path)
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        from docx2pdf import convert as docx2pdf_convert
+        docx2pdf_convert(docx_path, pdf_path)
+        return pdf_path
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"  docx2pdf: {e}")
+    try:
+        import subprocess
+        for cmd in ("soffice", "libreoffice"):
+            try:
+                subprocess.run(
+                    [
+                        cmd,
+                        "--headless",
+                        "--convert-to", "pdf",
+                        "--outdir", out_dir,
+                        docx_path,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    timeout=120,
+                )
+                generated = os.path.join(out_dir, os.path.splitext(os.path.basename(docx_path))[0] + ".pdf")
+                if os.path.isfile(generated):
+                    if os.path.normpath(generated) != os.path.normpath(pdf_path):
+                        import shutil
+                        shutil.move(generated, pdf_path)
+                    return pdf_path
+            except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                continue
+    except Exception as e:
+        print(f"  LibreOffice: {e}")
+    return None
+
+
 FONT_NAME = "Times New Roman"
 
 
@@ -42,11 +95,12 @@ def set_cell_text(cell, value):
 
 
 # --- Справочник индексов (таблица, строка, столбец) для каждого поля ---
-# Структура документа: 0 — План, 1 — Масштаб, 2 — Нагрузки, 3 — Напряжения, 4 — Доп данные, 5 — Условия.
+# Структура документа: 0 — План, 1 — Масштаб, 2 — Нагрузки, 3 — Напряжения, 4 — Напряжения (табл.3), 5 — Доп данные, 6 — Условия.
 LOADS_TABLE_INDEX = 2
 VOLTAGE_TABLE_INDEX = 3
-ADDITIONAL_TABLE_INDEX = 4
-CONDITIONS_TABLE_INDEX = 5
+VOLTAGE_TABLE_2_INDEX = 4   # таблица 3 — заполняется так же, как таблица 2
+ADDITIONAL_TABLE_INDEX = 5  # бывшая таблица 3
+CONDITIONS_TABLE_INDEX = 6   # бывшая таблица 4
 
 # Таблица нагрузок (индекс 2): данные о нагрузках района (строки 4–7 — подстанции, строка 8 — генерация).
 # Для каждой подстанции заполняется только один уровень напряжения: либо 110 кВ (колонки 1–4), либо 10 кВ (колонки 5–8).
@@ -68,10 +122,12 @@ TABLE1_LOAD_COLS = {
 TABLE1_COLS_110 = (1, 2, 3, 4)   # p_max_110, tg_max_110, p_min_110, tg_min_110
 TABLE1_COLS_10 = (5, 6, 7, 8)    # p_max_10, tg_max_10, p_min_10, tg_min_10
 TABLE1_GEN_ROW = 8
+TABLE1_STATION_TYPE_ROW = 9   # строка 9 — тип станции (ГЭС, АЭС, ГРЭС)
+TABLE1_STATION_TYPE_COL = 5   # cell 5
 TABLE1_GEN_CELLS = {
-    "gen_node": 4,            # узел с генерацией
-    "p_ust": 7,               # Руст, МВт
-    "gen_count": 10,          # количество генераторов
+    "gen_node": 4,            # узел с генерацией (всегда 5)
+    "p_ust": 7,               # Руст, МВт (по типу станции)
+    "gen_count": 10,          # количество блоков (по типу станции)
 }
 
 # Таблица 2: уровни напряжения на шинах ПС А
@@ -166,14 +222,25 @@ def _draw_label_center_png(png_bytes, label):
     return out.getvalue()
 
 
-def add_circle_to_cell(cell, label=None, size_inches=None):
-    """Вставить в ячейку кружок (PNG); подпись — в центре кружка (если есть Pillow)."""
+def add_circle_to_cell(cell, label=None, size_inches=None, image_path=None):
+    """
+    Вставить в ячейку кружок (PNG) или картинку из файла.
+    image_path — путь к PNG/JPEG (например из папки Nodes); если задан и файл есть — вставляется он.
+    Иначе рисуется кружок; подпись в центре — при наличии Pillow.
+    """
     size_inches = size_inches or CIRCLE_SIZE_INCHES
     if not cell.paragraphs:
         cell.add_paragraph()
     p = cell.paragraphs[0]
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = p.add_run()
+    if image_path and os.path.isfile(image_path):
+        run.add_picture(
+            image_path,
+            width=Inches(size_inches),
+            height=Inches(size_inches),
+        )
+        return
     png_bytes = _make_circle_png(100, 5)
     if label:
         png_bytes = _draw_label_center_png(png_bytes, label)
@@ -184,11 +251,12 @@ def add_circle_to_cell(cell, label=None, size_inches=None):
     )
 
 
-def fill_table0_substations(doc, positions, draw_circles=False, circle_size_inches=None):
+def fill_table0_substations(doc, positions, draw_circles=False, circle_size_inches=None, nodes_dir=None):
     """
-    Наложить кружки подстанций на таблицу doc.tables[0] по координатам (row, col).
-    positions: список dict с ключами row, col, label (индексы ячейки и подпись: «ПС А», «1», «2», …).
-    Подпись рисуется в центре кружка (при наличии Pillow).
+    Наложить элементы схемы на таблицу doc.tables[0] по координатам (row, col).
+    Используются рисунки из папки Nodes: для каждого label ищется файл {label}.png или {label}.jpg.
+    Если файла нет — рисуется кружок с подписью (fallback).
+    positions: список dict с ключами row, col, label (подпись: «A», «B», «1» … «5»).
     """
     if not positions or len(doc.tables) < 1 or not draw_circles:
         return
@@ -204,7 +272,14 @@ def fill_table0_substations(doc, positions, draw_circles=False, circle_size_inch
         if col_idx < 0 or col_idx >= len(row.cells):
             continue
         cell = row.cells[col_idx]
-        add_circle_to_cell(cell, label=label, size_inches=size)
+        image_path = None
+        if nodes_dir and label:
+            for ext in (".png", ".jpg", ".jpeg"):
+                p = os.path.join(nodes_dir, str(label) + ext)
+                if os.path.isfile(p):
+                    image_path = p
+                    break
+        add_circle_to_cell(cell, label=label if not image_path else None, size_inches=size, image_path=image_path)
 
 
 def fill_table1(doc, data):
@@ -240,13 +315,22 @@ def fill_table1(doc, data):
     gen = data.get("generation") or {}
     if TABLE1_GEN_ROW < len(t.rows):
         row = t.rows[TABLE1_GEN_ROW]
-        for key, col in TABLE1_GEN_CELLS.items():
-            if key in gen and col < len(row.cells):
-                set_cell_text(row.cells[col], gen[key])
+        # Ячейка 4 — всегда узел с генерацией «5»
+        set_cell_text(row.cells[TABLE1_GEN_CELLS["gen_node"]], gen.get("gen_node", "5"))
+        for key in ("p_ust", "gen_count"):
+            if key in gen:
+                col = TABLE1_GEN_CELLS[key]
+                if col < len(row.cells):
+                    set_cell_text(row.cells[col], gen[key])
+    if TABLE1_STATION_TYPE_ROW < len(t.rows) and TABLE1_STATION_TYPE_COL < len(t.rows[TABLE1_STATION_TYPE_ROW].cells):
+        set_cell_text(
+            t.rows[TABLE1_STATION_TYPE_ROW].cells[TABLE1_STATION_TYPE_COL],
+            (gen or {}).get("station_type", ""),
+        )
 
 
 def fill_table2(doc, data):
-    """Таблица напряжений на шинах ПС А (doc.tables[3])."""
+    """Таблица 2: напряжения на шинах ПС А (doc.tables[3])."""
     idx = VOLTAGE_TABLE_INDEX
     if len(doc.tables) <= idx:
         return
@@ -258,8 +342,21 @@ def fill_table2(doc, data):
             set_cell_text(t.rows[row_idx].cells[col_idx], data[key])
 
 
+def fill_table3_voltage(doc, data):
+    """Таблица 3: заполняется так же, как таблица 2 (напряжения) — doc.tables[4]."""
+    idx = VOLTAGE_TABLE_2_INDEX
+    if len(doc.tables) <= idx:
+        return
+    t = doc.tables[idx]
+    for row_idx, col_idx, key in TABLE2_PLACES:
+        if key not in data:
+            continue
+        if row_idx < len(t.rows) and col_idx < len(t.rows[row_idx].cells):
+            set_cell_text(t.rows[row_idx].cells[col_idx], data[key])
+
+
 def fill_table3(doc, data):
-    """Таблица дополнительных данных 3.4 (doc.tables[4])."""
+    """Таблица 4 (доп. данные 3.4) — doc.tables[5]."""
     idx = ADDITIONAL_TABLE_INDEX
     if len(doc.tables) <= idx:
         return
@@ -272,7 +369,7 @@ def fill_table3(doc, data):
 
 
 def fill_table4(doc, data):
-    """Таблица условий сооружения и работы сети (doc.tables[5])."""
+    """Таблица 5: условия сооружения и работы сети — doc.tables[6]."""
     idx = CONDITIONS_TABLE_INDEX
     if len(doc.tables) <= idx:
         return
@@ -393,15 +490,19 @@ def fill_document(doc, data):
     fill_paragraph3(doc, data)
     fill_paragraph4(doc, data)
     fill_paragraph5(doc, data)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    nodes_dir = data.get("nodes_dir") or os.path.join(script_dir, "Nodes")
     fill_table0_substations(
         doc,
         data.get("substation_positions") or [],
         draw_circles=data.get("draw_substation_circles", False),
         circle_size_inches=data.get("circle_size_inches"),
+        nodes_dir=nodes_dir,
     )
     fill_scale(doc, data)
     fill_table1(doc, data)
     fill_table2(doc, data.get("voltage_ps_a") or {})
+    fill_table3_voltage(doc, data.get("voltage_table3") or data.get("voltage_ps_a") or {})
     fill_table3(doc, data.get("additional") or {})
     fill_table4(doc, data.get("conditions") or {})
 
@@ -423,6 +524,8 @@ def main():
                         help="Путь к JSON с данными для подстановки")
     parser.add_argument("--out", "-o", default=None,
                         help="Путь к выходному файлу")
+    parser.add_argument("--pdf", "-p", action="store_true",
+                        help="Дополнительно сохранить результат в PDF")
     args = parser.parse_args()
 
     template_path = args.template or os.path.join(script_dir, "Шаблон Район нагрузок электрической сети.docx")
@@ -444,6 +547,12 @@ def main():
     fill_document(doc, data)
     doc.save(out_path)
     print(f"Сохранено: {out_path}")
+    if args.pdf:
+        pdf_path = convert_docx_to_pdf(out_path)
+        if pdf_path:
+            print(f"PDF: {pdf_path}")
+        else:
+            print("Не удалось создать PDF. Установите docx2pdf (pip install docx2pdf) и Microsoft Word или LibreOffice.")
     return 0
 
 
@@ -505,13 +614,18 @@ def create_example_data(path):
             }
         ],
         "generation": {
-            "gen_node": "ПС-2",
-            "p_ust": "12",
-            "gen_count": "2"
+            "gen_node": "5",
+            "p_ust": "400",
+            "gen_count": "4",
+            "station_type": "ГЭС"
         },
         "voltage_ps_a": {
             "u_max": "116",
             "u_min": "112"
+        },
+        "voltage_table3": {
+            "u_max": "117",
+            "u_min": "110"
         },
         "additional": {
             "km": "0.95",
@@ -525,11 +639,13 @@ def create_example_data(path):
             "theta_ohl": "-25"
         },
         "substation_positions": [
-            {"row": 2, "col": 2, "label": "ПС А"},
-            {"row": 2, "col": 6, "label": "1"},
+            {"row": 2, "col": 0, "label": "A"},
+            {"row": 2, "col": 14, "label": "B"},
+            {"row": 2, "col": 5, "label": "1"},
             {"row": 5, "col": 3, "label": "2"},
             {"row": 5, "col": 8, "label": "3"},
-            {"row": 8, "col": 5, "label": "4"}
+            {"row": 7, "col": 5, "label": "4"},
+            {"row": 4, "col": 7, "label": "5"}
         ]
     }
     with open(path, "w", encoding="utf-8") as f:

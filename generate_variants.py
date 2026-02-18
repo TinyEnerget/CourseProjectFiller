@@ -15,7 +15,7 @@ import random
 import argparse
 from docx import Document
 
-from fill_template import fill_document
+from fill_template import fill_document, convert_docx_to_pdf
 
 
 def load_config(path):
@@ -43,6 +43,65 @@ def _format_number(x):
             return str(int(x))
         return str(round(x, 2)).rstrip("0").rstrip(".")
     return str(x)
+
+
+# Типы станций для строки 8 таблицы нагрузок: Руст и количество блоков
+STATION_TYPES = {
+    "ГЭС": {
+        "p_ust_range": (200, 500),      # МВт на блок
+        "total_range": (1200, 3000),    # общая мощность МВт
+        "blocks_range": (3, 6),
+    },
+    "АЭС": {
+        "p_ust_range": (800, 1200),
+        "total_range": (2400, 3600),
+        "blocks_range": (3, 3),
+    },
+    "ГРЭС": {
+        "p_ust_range": (100, 300),
+        "total_range": (1200, 3600),
+        "blocks_range": (3, 12),
+    },
+}
+
+
+def _generate_station(config):
+    """
+    Случайный выбор типа станции (ГЭС, АЭС, ГРЭС) и расчёт Руст, количества блоков
+    в заданных диапазонах. Узел с генерацией всегда 5.
+    """
+    st_name = random.choice(list(STATION_TYPES.keys()))
+    st = STATION_TYPES[st_name]
+    p_min, p_max = st["p_ust_range"]
+    total_min, total_max = st["total_range"]
+    b_min, b_max = st["blocks_range"]
+
+    for _ in range(100):
+        blocks = random.randint(b_min, b_max)
+        # Подобрать Руст так, чтобы total = blocks * p_ust лежало в [total_min, total_max]
+        # p_ust_min = total_min / blocks, p_ust_max = total_max / blocks, и в [p_min, p_max]
+        pu_lo = max(p_min, total_min / blocks)
+        pu_hi = min(p_max, total_max / blocks)
+        if pu_lo > pu_hi:
+            continue
+        p_ust = random.uniform(pu_lo, pu_hi)
+        total = blocks * p_ust
+        if total_min <= total <= total_max and p_min <= p_ust <= p_max:
+            return {
+                "gen_node": "5",
+                "p_ust": _format_number(round(p_ust, 0)),
+                "gen_count": str(blocks),
+                "station_type": st_name,
+            }
+    # Fallback
+    p_ust = (total_min + total_max) / 2 / max(b_min, 1)
+    blocks = max(b_min, min(b_max, int(total_max / p_ust)))
+    return {
+        "gen_node": "5",
+        "p_ust": _format_number(round(p_ust, 0)),
+        "gen_count": str(blocks),
+        "station_type": st_name,
+    }
 
 
 def generate_one_variant(config, oes_override=None, seed=None):
@@ -136,20 +195,49 @@ def generate_one_variant(config, oes_override=None, seed=None):
 
     loads = [{k: _format_number(v) if isinstance(v, (int, float)) else v for k, v in row.items()} for row in loads_raw]
 
-    gen_r = ranges.get("generation", {})
-    gen_node_idx = random.randint(0, n_loads - 1) if n_loads else 0
-    gen_node = loads[gen_node_idx]["number_ps"] if loads else "ПС-1"
-    generation = {
-        "gen_node": gen_node,
-        "p_ust": _format_number(_rand_range(gen_r.get("p_ust", {"min": 5, "max": 25}))),
-        "gen_count": _format_number(_rand_range(gen_r.get("gen_count", {"min": 1, "max": 4}))),
-    }
+    # Генерация: узел всегда 5; Руст и количество блоков — по типу станции (ГЭС, АЭС, ГРЭС)
+    generation = _generate_station(config)
 
+
+    # Таблицы 2 и 3 — напряжения. Значение 1 (u_max) всегда строго больше значения 2 (u_min). Между таблицами — разные пары.
     v_r = ranges.get("voltage_ps_a", {})
-    voltage_ps_a = {
-        "u_max": _format_number(_rand_range(v_r.get("u_max", {"min": 114, "max": 118}))),
-        "u_min": _format_number(_rand_range(v_r.get("u_min", {"min": 108, "max": 114}))),
-    }
+    u_max_range = v_r.get("u_max", {"min": 114, "max": 118})
+    u_min_range = v_r.get("u_min", {"min": 108, "max": 114})
+    for _ in range(50):
+        v_max_1 = _rand_range(u_max_range)
+        v_min_1 = _rand_range(u_min_range)
+        if isinstance(v_max_1, (int, float)) and isinstance(v_min_1, (int, float)) and v_max_1 > v_min_1:
+            break
+    else:
+        v_max_1, v_min_1 = 116.0, 110.0
+    u_max_1 = _format_number(v_max_1)
+    u_min_1 = _format_number(v_min_1)
+    voltage_ps_a = {"u_max": u_max_1, "u_min": u_min_1}
+    for _ in range(50):
+        v_max_2 = _rand_range(u_max_range)
+        v_min_2 = _rand_range(u_min_range)
+        if not (isinstance(v_max_2, (int, float)) and isinstance(v_min_2, (int, float)) and v_max_2 > v_min_2):
+            continue
+        u_max_2 = _format_number(v_max_2)
+        u_min_2 = _format_number(v_min_2)
+        if u_max_2 != u_max_1 and u_min_2 != u_min_1:
+            voltage_table3 = {"u_max": u_max_2, "u_min": u_min_2}
+            break
+    else:
+        # принудительно разные от таблицы 2 и строго u_max > u_min
+        v1, v2 = float(u_max_1), float(u_min_1)
+        delta = max(1, (v1 - v2) / 4)
+        v_max_2 = v1 + random.choice([-1, 1]) * delta
+        v_min_2 = v2 + random.choice([-1, 1]) * delta
+        if v_max_2 <= v_min_2:
+            v_min_2 = v_max_2 - delta
+        v_max_2 = max(109, min(119, v_max_2))
+        v_min_2 = max(107, min(115, v_min_2))
+        if v_max_2 <= v_min_2:
+            v_min_2 = v_max_2 - 1
+        u_max_2 = _format_number(v_max_2)
+        u_min_2 = _format_number(v_min_2)
+        voltage_table3 = {"u_max": u_max_2, "u_min": u_min_2}
 
     add_r = ranges.get("additional", {})
     additional = {
@@ -165,105 +253,144 @@ def generate_one_variant(config, oes_override=None, seed=None):
         "theta_ohl": str(oes["theta_ohl"]),
     }
 
-    # Координаты на плане (таблица 0): 5 кружков — ПС А (первый), затем подстанции 1–4.
-    # Условие: расстояние между любыми двумя кружками не менее min_circle_distance ячеек (метрика Чебышёва).
-    plan = config.get("table0_plan") or {"rows": 10, "cols": 10}
+    # План: узлы A и B по бокам (по 2 клетки по x с каждой стороны), 1,2,3,4,5 — в центральной области.
+    # A и B на разных сторонах. Масштаб подбирается так, чтобы расстояние A–B было 200–250 км.
+    plan = config.get("table0_plan") or {"rows": 10, "cols": 12}
     n_rows = max(1, int(plan.get("rows", 10)))
-    n_cols = max(1, int(plan.get("cols", 10)))
+    n_cols = max(1, int(plan.get("cols", 12)))
     min_dist = max(0, int(plan.get("min_circle_distance", 0)))
+    grid_step_cm = max(0.1, float(plan.get("grid_step_cm", 1)))
 
     def _chebyshev_dist(r1, c1, r2, c2):
         return max(abs(r1 - r2), abs(c1 - c2))
 
     def _far_enough(r, c, placed):
-        """Новая точка (r, c) не ближе min_dist ни к одной из уже размещённых (по Чебышёву)."""
         for (rp, cp) in placed:
             if _chebyshev_dist(r, c, rp, cp) < min_dist:
                 return False
         return True
 
     def _min_dist_to_placed(r, c, placed):
-        """Минимальное расстояние от (r, c) до размещённых точек (Чебышёв)."""
         if not placed:
             return float("inf")
         return min(_chebyshev_dist(r, c, rp, cp) for (rp, cp) in placed)
 
-    labels = ["ПС А"] + [loads[i]["number_ps"] for i in range(min(4, len(loads)))]
-    n_circles = 5
+    # Центральная область: по x от 2 до n_cols-3 (по 2 клетки слева и справа под A и B)
+    center_col_min, center_col_max = 2, n_cols - 3
+    if center_col_max < center_col_min:
+        center_col_min, center_col_max = 0, n_cols - 1
+
     positions = []
     placed = []
-    # Расположение ПС А (первый кружок): только слева или справа на сетке
-    ps_a_side = (plan.get("ps_a_side") or "random").strip().lower()
-    if ps_a_side == "random":
-        ps_a_side = random.choice(["left", "right"])
-    if ps_a_side == "left":
-        ps_a_col = 0
+    # Узел A — левая сторона (колонки 0 или 1), B — правая (n_cols-2 или n_cols-1), или наоборот
+    side_a = random.choice(["left", "right"])
+    side_b = "right" if side_a == "left" else "left"
+    if side_a == "left":
+        a_col = random.randint(0, min(1, n_cols - 1))
+        b_col = random.choice([n_cols - 2, n_cols - 1]) if n_cols >= 2 else n_cols - 1
     else:
-        ps_a_col = n_cols - 1
-    ps_a_row = random.randint(0, n_rows - 1)
-    placed.append((ps_a_row, ps_a_col))
-    positions.append({"row": ps_a_row, "col": ps_a_col, "label": labels[0]})
+        a_col = random.choice([n_cols - 2, n_cols - 1]) if n_cols >= 2 else n_cols - 1
+        b_col = random.randint(0, min(1, n_cols - 1))
+    a_row = random.randint(0, n_rows - 1)
+    b_row = random.randint(0, n_rows - 1)
+    # Не совпадение A и B (разные стороны уже гарантированы при n_cols >= 4)
+    placed.append((a_row, a_col))
+    placed.append((b_row, b_col))
+    positions.append({"row": a_row, "col": a_col, "label": "A"})
+    positions.append({"row": b_row, "col": b_col, "label": "B"})
 
-    for idx in range(1, n_circles):
-        label = labels[idx] if idx < len(labels) else str(idx + 1)
-        for _ in range(200):
-            r = random.randint(0, n_rows - 1)
-            c = random.randint(0, n_cols - 1)
-            if (r, c) not in {(p[0], p[1]) for p in placed} and _far_enough(r, c, placed):
+    center_cells = [
+        (r, c) for r in range(n_rows) for c in range(center_col_min, center_col_max + 1)
+        if (r, c) not in {(p[0], p[1]) for p in placed}
+    ]
+    random.shuffle(center_cells)
+    # Разместить 1,2,3,4 в центральной области с min_circle_distance
+    for label in ["1", "2", "3", "4"]:
+        found = False
+        for (r, c) in center_cells:
+            if (r, c) in {(p[0], p[1]) for p in placed}:
+                continue
+            if _far_enough(r, c, placed):
                 placed.append((r, c))
                 positions.append({"row": r, "col": c, "label": label})
+                found = True
                 break
-        else:
-            # Fallback: ищем любую свободную ячейку с допустимым расстоянием; если нет — ставим в точку, наиболее удалённую от уже размещённых
-            found = False
+        if not found:
             for r in range(n_rows):
-                for c in range(n_cols):
-                    if (r, c) not in {(p[0], p[1]) for p in placed} and _far_enough(r, c, placed):
+                for c in range(center_col_min, center_col_max + 1):
+                    if (r, c) in {(p[0], p[1]) for p in placed}:
+                        continue
+                    if _far_enough(r, c, placed):
                         placed.append((r, c))
                         positions.append({"row": r, "col": c, "label": label})
                         found = True
                         break
                 if found:
                     break
-            if not found:
-                best_r, best_c = None, None
-                best_d = -1
-                for r in range(n_rows):
-                    for c in range(n_cols):
-                        if (r, c) in {(p[0], p[1]) for p in placed}:
-                            continue
-                        d = _min_dist_to_placed(r, c, placed)
-                        if d > best_d:
-                            best_d, best_r, best_c = d, r, c
-                if best_r is not None:
-                    placed.append((best_r, best_c))
-                    positions.append({"row": best_r, "col": best_c, "label": label})
-                else:
-                    r_fb = len(positions) % n_rows
-                    c_fb = (len(positions) * 2) % n_cols
-                    placed.append((r_fb, c_fb))
-                    positions.append({"row": r_fb, "col": c_fb, "label": label})
+        if not found:
+            best_r, best_c, best_d = None, None, -1
+            for (r, c) in center_cells:
+                if (r, c) in {(p[0], p[1]) for p in placed}:
+                    continue
+                d = _min_dist_to_placed(r, c, placed)
+                if d > best_d:
+                    best_d, best_r, best_c = d, r, c
+            if best_r is not None:
+                placed.append((best_r, best_c))
+                positions.append({"row": best_r, "col": best_c, "label": label})
 
-    # Масштаб плана: шаг сетки grid_step_cm см; макс. расстояние от ПС А до дальней подстанции — не более max_distance_km км.
-    # scale_km_per_cm: 1 см на плане = X км в натуре (подбирается так, чтобы макс. расстояние по плану давало ровно max_distance_km).
-    grid_step_cm = max(0.1, float(plan.get("grid_step_cm", 1)))
-    max_distance_km = max(1.0, float(plan.get("max_distance_km", 200)))
-    r0, c0 = positions[0]["row"], positions[0]["col"]
-    max_dist_cells = 0
-    for pos in positions[1:]:
-        d = _chebyshev_dist(r0, c0, pos["row"], pos["col"])
-        if d > max_dist_cells:
-            max_dist_cells = d
-    max_dist_cm = max_dist_cells * grid_step_cm
-    if max_dist_cm < 0.1:
-        max_dist_cm = 0.1
-    scale_km_per_cm = max_distance_km / max_dist_cm
+    # Узел 5 — в центре, с условием: расстояние от A до 5 ≈ от B до 5
+    a_pos = (positions[0]["row"], positions[0]["col"])
+    b_pos = (positions[1]["row"], positions[1]["col"])
+    candidates_5 = [
+        (r, c) for (r, c) in center_cells
+        if (r, c) not in {(p[0], p[1]) for p in placed} and _far_enough(r, c, placed)
+    ]
+    if candidates_5:
+        def _imbalance(r, c):
+            d_a = _chebyshev_dist(r, c, a_pos[0], a_pos[1])
+            d_b = _chebyshev_dist(r, c, b_pos[0], b_pos[1])
+            return abs(d_a - d_b)
+        candidates_5.sort(key=lambda rc: _imbalance(rc[0], rc[1]))
+        r5, c5 = candidates_5[0]
+        placed.append((r5, c5))
+        positions.append({"row": r5, "col": c5, "label": "5"})
+    else:
+        # fallback: любая свободная центральная ячейка или середина по колонке
+        mid_c = (center_col_min + center_col_max) // 2
+        for r in range(n_rows):
+            if (r, mid_c) not in {(p[0], p[1]) for p in placed} and _far_enough(r, mid_c, placed):
+                placed.append((r, mid_c))
+                positions.append({"row": r, "col": mid_c, "label": "5"})
+                break
+        else:
+            for r in range(n_rows):
+                for c in range(center_col_min, center_col_max + 1):
+                    if (r, c) not in {(p[0], p[1]) for p in placed}:
+                        placed.append((r, c))
+                        positions.append({"row": r, "col": c, "label": "5"})
+                        break
+                else:
+                    continue
+                break
+
+    # Масштаб: расстояние A–B не менее min_distance_ab_km и не более max_distance_ab_km (200–250 км).
+    dist_ab_cells = _chebyshev_dist(a_pos[0], a_pos[1], b_pos[0], b_pos[1])
+    dist_ab_cm = max(0.1, dist_ab_cells * grid_step_cm)
+    min_distance_ab_km = max(1.0, float(plan.get("min_distance_ab_km", 200)))
+    max_distance_ab_km = max(min_distance_ab_km, float(plan.get("max_distance_ab_km", 250)))
+    scale_min = min_distance_ab_km / dist_ab_cm
+    scale_max = max_distance_ab_km / dist_ab_cm
+    if scale_max < scale_min:
+        scale_max = scale_min + 1.0
+    scale_km_per_cm = random.uniform(scale_min, scale_max)
     scale_text = str(round(scale_km_per_cm, 1) if scale_km_per_cm >= 10 else round(scale_km_per_cm, 2))
 
     return {
         "loads": loads,
         "generation": generation,
         "voltage_ps_a": voltage_ps_a,
+        "voltage_table3": voltage_table3,
         "additional": additional,
         "conditions": conditions,
         "substation_positions": positions,
@@ -271,7 +398,6 @@ def generate_one_variant(config, oes_override=None, seed=None):
         "circle_size_inches": config.get("circle_size_inches"),
         "scale_km_per_cm": round(scale_km_per_cm, 4),
         "scale_text": scale_text,
-        "max_distance_cells": max_dist_cells,
         "scale_cell": plan.get("scale_cell"),
     }
 
@@ -294,6 +420,8 @@ def main():
                         help="Путь к config_variants.json (ОЭС и диапазоны)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Seed для ГПСЧ (для воспроизводимости)")
+    parser.add_argument("--pdf", "-p", action="store_true",
+                        help="Дополнительно сохранять каждый вариант в PDF")
     args = parser.parse_args()
 
     if args.count < 1:
@@ -332,8 +460,15 @@ def main():
         out_name = f"variant_{i + 1:03d}.docx"
         out_path = os.path.join(out_dir, out_name)
         doc.save(out_path)
-        print(f"  {out_name}  OES: {data['conditions']['oes']}, theta_ohl: {data['conditions']['theta_ohl']} C")
+        line = f"  {out_name}  OES: {data['conditions']['oes']}, theta_ohl: {data['conditions']['theta_ohl']} C"
+        if args.pdf:
+            pdf_path = convert_docx_to_pdf(out_path)
+            if pdf_path:
+                line += f"  → {os.path.basename(pdf_path)}"
+        print(line)
 
+    if args.pdf:
+        print("Для PDF нужны: pip install docx2pdf и Microsoft Word или LibreOffice (soffice).")
     print(f"Создано вариантов: {args.count} в папке {out_dir}")
     return 0
 
